@@ -43,6 +43,8 @@ globalThis.document = {
 const $ = (sel) => document.querySelector(sel);
 const type = (idx, field, value) =>
   $('#input-panel').fire('input', { target: new FakeInputElement({ idx: String(idx), field }, value) });
+const typeDrift = (idx, value) =>
+  $('#input-panel').fire('input', { target: new FakeInputElement({ driftIdx: String(idx) }, value) });
 
 await import('../src/app.js');
 
@@ -99,4 +101,46 @@ test('警报类别与保留前缀的增删及数量上限', () => {
   $('#add-reserved').fire('click');
   $('#add-reserved').fire('click');
   assert.equal($('#add-reserved').disabled, true); // 3 条封顶
+});
+
+const reviewBtnEvent = {
+  target: { id: 'review', closest: (sel) => (sel === '#review' ? { id: 'review' } : null) },
+};
+
+test('稳健性复核：默认零漂移稳定，展示允许区间与稳健证书', () => {
+  $('#load-sample').fire('click');
+  assert.ok($('#alert-rows').innerHTML.includes('频次漂移幅度'));
+  $('#solve').fire('click');
+  let html = $('#results').innerHTML;
+  assert.ok(html.includes('发起稳健性复核'));
+  // 默认漂移幅度全为 0：点击复核按钮（事件委托）
+  $('#results').fire('click', reviewBtnEvent);
+  html = $('#results').innerHTML;
+  assert.ok(html.includes('稳健'));
+  assert.ok(html.includes('允许闭区间') || html.includes('实际频次区间'));
+  assert.ok(html.includes('稳健证书'));
+});
+
+test('稳健性复核：改漂移幅度使旧稳健结论失效，加大漂移得到最小反例', () => {
+  // 示例 6 类全部漂移 2：存在总偏移 1 的三级决胜反例
+  for (let i = 0; i < 6; i++) typeDrift(i, '2');
+  let html = $('#results').innerHTML;
+  assert.ok(html.includes('失效')); // 稳健结论失效提示
+  $('#results').fire('click', reviewBtnEvent);
+  html = $('#results').innerHTML;
+  assert.ok(html.includes('不稳健'));
+  assert.ok(html.includes('总偏移量'));
+  assert.ok(html.includes('替代码表'));
+  assert.ok(html.includes('决胜'));
+});
+
+test('频次/码长/保留/警报顺序变动后码表与稳健结论同时失效', () => {
+  // 当前已有反例复核结果；改动频次应使整个结果区失效
+  type(0, 'freq', '4');
+  assert.ok($('#results').innerHTML.includes('失效'));
+  assert.ok(!$('#results').innerHTML.includes('替代码表'));
+  type(0, 'freq', '3');
+  $('#solve').fire('click');
+  $('#results').fire('click', reviewBtnEvent);
+  assert.ok($('#results').innerHTML.includes('稳健') || $('#results').innerHTML.includes('不稳健'));
 });
