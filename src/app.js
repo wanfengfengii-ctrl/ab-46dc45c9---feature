@@ -1,5 +1,6 @@
 import {
   solve,
+  checkRobustness,
   MIN_ALERTS,
   MAX_ALERTS,
   MAX_RESERVED,
@@ -26,11 +27,19 @@ const state = {
   reserved: [...SAMPLE.reserved],
 };
 
+// 当前有效码表（生成码表成功后写入）及其稳健性复核结论。
+// 频次/码长/保留前缀/警报顺序任何变动都会立即清空二者。
+let currentSolution = null;
+let robustness = null; // checkRobustness 的原始返回
+
 const $ = (sel) => document.querySelector(sel);
 const alertRowsEl = $('#alert-rows');
 const reservedRowsEl = $('#reserved-rows');
 const errorsEl = $('#errors');
 const resultsEl = $('#results');
+const robustnessPanelEl = $('#robustness-panel');
+const driftRowsEl = $('#drift-rows');
+const robustResultEl = $('#robust-result');
 
 function esc(s) {
   return String(s)
@@ -104,6 +113,17 @@ function renderForm() {
 
 function invalidateResults(message = '输入已变更，旧结论已失效，请重新生成码表。') {
   resultsEl.innerHTML = `<p class="placeholder stale">${esc(message)}</p>`;
+  // 码表失效时，漂移录入与稳健性结论一并失效
+  currentSolution = null;
+  robustness = null;
+  robustnessPanelEl.hidden = true;
+  robustResultEl.innerHTML = '';
+}
+
+/** 仅使稳健性结论失效（码表仍然有效，例如修改漂移幅度时）。 */
+function invalidateRobustness(message = '漂移幅度已变更，请重新发起稳健性复核。') {
+  robustness = null;
+  robustResultEl.innerHTML = `<p class="placeholder stale">${esc(message)}</p>`;
 }
 
 function clearErrors() {
@@ -296,20 +316,193 @@ function collectInput() {
 }
 
 function onSolve() {
-  const result = solve(collectInput());
+  const collected = collectInput();
+  const result = solve(collected);
   if (result.status === 'invalid') {
     showErrors(result.errors);
     invalidateResults('参数未通过校验，旧结论已清除。');
     return;
   }
   clearErrors();
-  renderResult(result);
+  if (result.status === 'optimal') {
+    renderResult(result);
+    // 新有效码表：启用稳健性复核面板，并把码表与录入参数快照保存
+    currentSolution = { result, input: collected };
+    robustness = null;
+    renderDriftRows(collected.alerts);
+    robustnessPanelEl.hidden = false;
+    robustResultEl.innerHTML = '<p class="hint">请填写每类的频次漂移幅度（0 表示不容许波动），然后发起复核。</p>';
+  } else {
+    // infeasible / error：没有有效码表，复核面板必须关闭
+    renderResult(result);
+    currentSolution = null;
+    robustness = null;
+    robustnessPanelEl.hidden = true;
+    robustResultEl.innerHTML = '';
+  }
+}
+
+/* ---------------- 稳健性复核 ---------------- */
+
+function renderDriftRows(alerts) {
+  driftRowsEl.innerHTML = `
+    <table class="grid">
+      <thead>
+        <tr><th>#</th><th>警报</th><th>预计频次</th><th>允许区间</th><th>漂移幅度</th></tr>
+      </thead>
+      <tbody>
+        ${alerts
+          .map((a, i) => `
+          <tr>
+            <td class="idx">${i + 1}</td>
+            <td>${esc(a.name)}</td>
+            <td>${a.freq}</td>
+            <td class="interval-cell" data-interval="${i}">
+              <code class="code">[${a.freq}, ${a.freq}]</code>
+            </td>
+            <td><input type="number" data-drift-idx="${i}" value="0"
+                 min="0" max="${a.freq}" step="1" class="drift-input"></td>
+          </tr>`)
+          .join('')}
+      </tbody>
+    </table>`;
+}
+
+function onRobustCheck() {
+  if (!currentSolution) return;
+  const inputs = driftRowsEl.querySelectorAll('input[data-drift-idx]');
+  const drifts = [];
+  const driftErrors = [];
+  inputs.forEach((el) => {
+    const i = Number(el.dataset.driftIdx);
+    const t = String(el.value ?? '').trim();
+    const d = /^\d+$/.test(t) ? Number(t) : NaN;
+    const f = currentSolution.input.alerts[i].freq;
+    if (!Number.isInteger(d) || d < 0) {
+      driftErrors.push(`第 ${i + 1} 类警报：漂移幅度须为非负整数。`);
+    } else if (d > f) {
+      driftErrors.push(`第 ${i + 1} 类警报：漂移幅度不能超过预计频次 ${f}。`);
+    }
+    drifts[i] = d;
+  });
+  if (driftErrors.length > 0) {
+    robustResultEl.innerHTML =
+      `<div class="banner fail">✗ 漂移幅度未通过校验<ul>${driftErrors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>`;
+    return;
+  }
+  const rr = checkRobustness({ ...currentSolution.input, drifts });
+  robustness = rr;
+  renderRobustness(rr);
+}
+
+function renderRobustness(r) {
+  if (r.status === 'invalid') {
+    robustResultEl.innerHTML =
+      `<div class="banner fail">✗ 无法发起复核<ul>${r.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>`;
+    return;
+  }
+  if (r.status === 'error') {
+    robustResultEl.innerHTML = `<div class="banner fail">✗ 复核中断。<p>${esc(r.reason)}</p></div>`;
+    return;
+  }
+  const intervalRows = r.intervals
+    .map((it, i) => `
+      <tr>
+        <td class="idx">${i + 1}</td>
+        <td>${esc(it.name)}</td>
+        <td>${it.freq}</td>
+        <td><code class="code">[${it.lo}, ${it.hi}]</code></td>
+        <td>±${it.drift}</td>
+      </tr>`)
+    .join('');
+  const intervalTable = `
+    <table class="grid detail">
+      <thead><tr><th>#</th><th>警报</th><th>预计</th><th>允许频次闭区间</th><th>幅度</th></tr></thead>
+      <tbody>${intervalRows}</tbody>
+    </table>`;
+
+  if (r.status === 'robust') {
+    robustResultEl.innerHTML = `
+      <div class="banner ok">
+        ✓ 稳健证书：在 <b>${r.combos}</b> 个整数频次组合下，当前码表始终为最终解。
+      </div>
+      ${intervalTable}
+      <ul class="cert">
+        <li>逐一枚举满足 Kraft 容量的长度元组 <b>${r.tuplesEnumerated}</b> 个，
+            其中精确可行性检查 <b>${r.feasibilityChecks}</b> 个不同长度多重集合；</li>
+        <li>可能在第一层级（加权码长）推翻当前码表的候选 <b>${r.strictCandidates}</b> 个，
+            需在等成本点比较第二、三级决胜的候选 <b>${r.tieCandidates}</b> 个；</li>
+        <li>全部候选在盒内均无法推翻当前码字序列——现场频率在上述各闭区间内独立波动时，
+            码表保持既有最优地位，无需重新编配。</li>
+      </ul>`;
+    return;
+  }
+
+  // counterexample：最小反例 + 替代码表 + 首个改变的决胜层级
+  const w = r.witness;
+  const witnessRows = w.replacement.alerts
+    .map((a, i) => `
+      <tr>
+        <td class="idx">${i + 1}</td>
+        <td>${esc(a.name)}</td>
+        <td class="freq-cell">
+          ${r.intervals[i].freq}
+          <span class="${w.offsets[i] > 0 ? 'drift-badge' : ''}">
+            ${w.offsets[i] > 0 ? `→ <b>${a.freq}</b>（偏移 ${a.freq - r.intervals[i].freq >= 0 ? '+' : ''}${a.freq - r.intervals[i].freq}）` : ''}
+          </span>
+        </td>
+        <td><code class="code">${esc(w.baseline.codes[i])}</code></td>
+        <td><code class="code alt">${esc(a.code)}</code></td>
+        <td>${a.length}</td>
+        <td>${a.freq} × ${a.length} = <b>${a.contribution}</b></td>
+      </tr>`)
+    .join('');
+  robustResultEl.innerHTML = `
+    <div class="banner fail">
+      ✗ 找到足以推翻当前码表的最小反例：总偏移量 <b>${w.totalOffset}</b>，
+      首个改变的决胜层级为 <b>${esc(w.levelName)}</b>。
+    </div>
+    ${intervalTable}
+    <p class="hint">反例频次序列（总偏移最小，并列时按警报输入顺序取字典序最小）：
+      <code class="code alt">[${w.freqs.join(', ')}]</code></p>
+    <h3>替代码表（在反例频次下重新求解）</h3>
+    <table class="grid detail">
+      <thead>
+        <tr><th>#</th><th>警报</th><th>实际频次</th><th>当前码字</th><th>替代码字</th><th>码长</th><th>加权贡献</th></tr>
+      </thead>
+      <tbody>${witnessRows}</tbody>
+      <tfoot>
+        <tr><td colspan="6">反例频次下替代码表总成本 / 当前码表成本</td>
+        <td><b>${w.replacement.cost}</b> / ${w.baseline.costAtWitness ?? '—'}</td></tr>
+      </tfoot>
+    </table>
+    <p class="hint">
+      共枚举长度元组 ${r.tuplesEnumerated} 个（精确可行性检查 ${r.feasibilityChecks} 个）；
+      按此反例频次重新编配即可得到该频点下的最优码表。
+    </p>`;
 }
 
 /* ---------------- 事件绑定 ---------------- */
 
 function bindEvents() {
   $('#solve').addEventListener('click', onSolve);
+  $('#robust-check').addEventListener('click', onRobustCheck);
+
+  // 漂移幅度输入：仅使稳健性结论失效（码表仍然有效），并联动更新允许区间
+  robustnessPanelEl.addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (!(t instanceof HTMLInputElement) || t.dataset.driftIdx === undefined) return;
+    invalidateRobustness();
+    if (currentSolution) {
+      const i = Number(t.dataset.driftIdx);
+      const f = currentSolution.input.alerts[i].freq;
+      const d = /^\d+$/.test(String(t.value).trim()) ? Number(t.value) : NaN;
+      const cell = driftRowsEl.querySelector?.(`[data-interval="${i}"] code`);
+      if (cell && Number.isInteger(d) && d >= 0 && d <= f) {
+        cell.textContent = `[${f - d}, ${f + d}]`;
+      }
+    }
+  });
 
   $('#add-alert').addEventListener('click', () => {
     if (state.alerts.length >= MAX_ALERTS) return;

@@ -21,12 +21,16 @@ class StubElement {
     this.disabled = false;
     this.hidden = false;
     this.listeners = {};
+    this.items = [];
   }
   addEventListener(type, fn) {
     (this.listeners[type] ??= []).push(fn);
   }
   fire(type, event = {}) {
     for (const fn of this.listeners[type] ?? []) fn(event);
+  }
+  querySelectorAll() {
+    return this.items;
   }
   closest() {
     return null;
@@ -99,4 +103,60 @@ test('警报类别与保留前缀的增删及数量上限', () => {
   $('#add-reserved').fire('click');
   $('#add-reserved').fire('click');
   assert.equal($('#add-reserved').disabled, true); // 3 条封顶
+});
+
+test('稳健性复核：仅在有效码表后出现，零漂移给稳健证书', () => {
+  $('#load-sample').fire('click');
+  assert.equal($('#robustness-panel').hidden, true); // 尚无有效码表
+  $('#solve').fire('click');
+  assert.equal($('#robustness-panel').hidden, false);
+  assert.ok($('#drift-rows').innerHTML.includes('漂移幅度'));
+  // 全部漂移幅度为 0
+  $('#drift-rows').items = Array.from({ length: 6 }, (_, i) =>
+    new FakeInputElement({ driftIdx: String(i) }, '0'));
+  $('#robust-check').fire('click');
+  assert.ok($('#robust-result').innerHTML.includes('稳健证书'));
+  assert.ok($('#robust-result').innerHTML.includes('1')); // 唯一组合
+});
+
+test('稳健性复核：非零漂移给最小反例、替代码表与决胜层级', () => {
+  // 第 2 类（强余震）允许漂移 1 即出现层级三反例
+  $('#drift-rows').items = Array.from({ length: 6 }, (_, i) =>
+    new FakeInputElement({ driftIdx: String(i) }, i === 1 ? '1' : '0'));
+  $('#robust-check').fire('click');
+  const html = $('#robust-result').innerHTML;
+  assert.ok(html.includes('最小反例'));
+  assert.ok(html.includes('总偏移量 <b>1</b>'));
+  assert.ok(html.includes('第三决胜层级'));
+  assert.ok(html.includes('替代码表'));
+  assert.ok(html.includes('[3, 7, 5, 12, 20, 15]'));
+});
+
+test('漂移幅度改动只失效复核结论；频次改动则码表与复核一并失效', () => {
+  $('#drift-rows').items = Array.from({ length: 6 }, (_, i) =>
+    new FakeInputElement({ driftIdx: String(i) }, '0'));
+  $('#robust-check').fire('click');
+  assert.ok($('#robust-result').innerHTML.includes('稳健证书'));
+  // 改漂移幅度：复核结论失效，但码表区仍在、面板仍可见
+  $('#robustness-panel').fire('input', { target: new FakeInputElement({ driftIdx: '0' }, '2') });
+  assert.ok($('#robust-result').innerHTML.includes('重新发起稳健性复核'));
+  assert.equal($('#robustness-panel').hidden, false);
+  // 改频次：码表失效，复核面板整体隐藏
+  type(0, 'freq', '4');
+  assert.equal($('#robustness-panel').hidden, true);
+  // 重新生成码表后面板恢复
+  type(0, 'freq', '3');
+  $('#solve').fire('click');
+  assert.equal($('#robustness-panel').hidden, false);
+});
+
+test('漂移幅度非法（负数 / 超过频次）给出校验提示', () => {
+  $('#drift-rows').items = Array.from({ length: 6 }, (_, i) =>
+    new FakeInputElement({ driftIdx: String(i) }, i === 0 ? '99' : '0'));
+  $('#robust-check').fire('click');
+  assert.ok($('#robust-result').innerHTML.includes('超过预计频次'));
+  $('#drift-rows').items = Array.from({ length: 6 }, (_, i) =>
+    new FakeInputElement({ driftIdx: String(i) }, i === 0 ? '-1' : '0'));
+  $('#robust-check').fire('click');
+  assert.ok($('#robust-result').innerHTML.includes('非负整数'));
 });

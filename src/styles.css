@@ -187,3 +187,29 @@ code.code.reserved { background: #fef2f2; border-color: #fecaca; color: #991b1b;
   font-size: 0.8rem;
   padding: 12px 24px 28px;
 }
+
+/* ---------------- 稳健性复核 ---------------- */
+
+.robustness {
+  margin-top: 26px;
+  padding-top: 18px;
+  border-top: 2px dashed var(--line);
+}
+.robustness h2 { margin-top: 4px; }
+.robustness table.grid input { max-width: 130px; }
+.robustness .btn.primary { margin-top: 12px; }
+
+code.code.alt {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+.freq-cell .drift-badge { color: #991b1b; font-size: 0.85rem; white-space: nowrap; }
+ul.cert {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  font-size: 0.88rem;
+  color: #065f46;
+}
+ul.cert li { margin-bottom: 6px; }
+.robustness .banner.fail ul { margin-top: 6px; }

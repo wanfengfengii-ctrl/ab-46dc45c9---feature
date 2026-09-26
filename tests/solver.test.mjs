@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   solve,
+  checkRobustness,
+  validateDrifts,
   validateInput,
   normalizeReserved,
   isPrefixFree,
@@ -315,4 +317,197 @@ test('码树布局：保留前缀渲染为保留节点', () => {
   const reserved = nodes.filter((n) => n.type === 'reserved');
   assert.equal(reserved.length, 1);
   assert.equal(reserved[0].prefix, '0');
+});
+
+/* ---------------- 稳健性复核 ---------------- */
+
+const robustAlert = (name, freq, lo, hi) => ({ name, freq, lo, hi });
+
+test('validateDrifts：非负整数且不超过预计频次', () => {
+  const alerts = [robustAlert('a', 3, 1, 3), robustAlert('b', 1, 1, 3)];
+  assert.deepEqual(validateDrifts({ alerts, drifts: [0, 1] }), []);
+  assert.deepEqual(validateDrifts({ alerts, drifts: [3, 0] }), []); // 恰为频次 ⇒ 区间下界 0
+  assert.ok(validateDrifts({ alerts, drifts: [4, 0] }).some((e) => e.includes('超过')));
+  assert.ok(validateDrifts({ alerts, drifts: [-1, 0] }).some((e) => e.includes('非负整数')));
+  assert.ok(validateDrifts({ alerts, drifts: [1] }).length > 0); // 数量不符
+  assert.ok(validateDrifts({ alerts, drifts: ['x', 0] }).some((e) => e.includes('非负整数')));
+});
+
+test('零漂移：唯一退化盒，当前码表必然稳健并给出稳健证书', () => {
+  const input = {
+    alerts: [
+      robustAlert('a', 3, 2, 6), robustAlert('b', 8, 2, 5), robustAlert('c', 5, 2, 5),
+      robustAlert('d', 12, 1, 4), robustAlert('e', 20, 1, 3), robustAlert('f', 15, 1, 4),
+    ],
+    reserved: ['1110'],
+    drifts: [0, 0, 0, 0, 0, 0],
+  };
+  const r = checkRobustness(input);
+  assert.equal(r.status, 'robust');
+  assert.equal(r.combos, '1');
+  assert.ok(r.tuplesEnumerated >= 1);
+  // 零漂移时任何改变码长的分支都被压力剪枝排除（无可行性候选），故可能为 0
+  assert.ok(r.feasibilityChecks >= 0);
+  assert.equal(r.strictCandidates, 0);
+  assert.equal(r.tieCandidates, 0);
+  assert.deepEqual(r.baseline.codes, solve(input).alerts.map((x) => x.code));
+  assert.deepEqual(r.intervals.map((x) => [x.lo, x.hi]), input.alerts.map((a) => [a.freq, a.freq]));
+});
+
+test('固定码长元组唯一：任意漂移下都稳健', () => {
+  const input = {
+    alerts: [
+      robustAlert('a', 5, 3, 3), robustAlert('b', 7, 3, 3), robustAlert('c', 2, 3, 3),
+      robustAlert('d', 9, 3, 3), robustAlert('e', 4, 3, 3),
+    ],
+    reserved: [],
+    drifts: [2, 3, 2, 4, 1],
+  };
+  const r = checkRobustness(input);
+  assert.equal(r.status, 'robust');
+  assert.equal(r.combos, String(5 * 7 * 5 * 9 * 3));
+  assert.equal(r.strictCandidates, 0);
+  assert.equal(r.tieCandidates, 0);
+});
+
+test('层级一反例：等频码表在单类频次下移 1 时被更便宜的分配推翻', () => {
+  const input = {
+    alerts: [
+      robustAlert('a', 5, 2, 3), robustAlert('b', 5, 2, 3), robustAlert('c', 5, 2, 3),
+      robustAlert('d', 5, 2, 3), robustAlert('e', 5, 2, 3),
+    ],
+    reserved: [],
+    drifts: [2, 0, 0, 0, 0],
+  };
+  const r = checkRobustness(input);
+  assert.equal(r.status, 'counterexample');
+  const w = r.witness;
+  assert.equal(w.firstChangedLevel, 1);
+  // 最小反例是盒"内部点" a:5→4（偏移 1），而非端点 a→3（偏移 2）——不能只抽样端点
+  assert.equal(w.totalOffset, 1);
+  assert.deepEqual(w.freqs, [4, 5, 5, 5, 5]);
+  assert.deepEqual(w.offsets, [1, 0, 0, 0, 0]);
+  // 见证频点：替代码表严格更便宜
+  assert.ok(w.replacement.cost < w.baseline.costAtWitness);
+  assert.equal(w.baseline.costAtWitness, 58);
+  assert.equal(w.replacement.cost, 57);
+  // 替代码表前缀无关且码长合法
+  assert.ok(isPrefixFree(w.replacement.codes));
+  w.replacement.alerts.forEach((x, i) => assert.ok(x.length >= 2 && x.length <= 3));
+  // 频次序列确实在盒内
+  w.freqs.forEach((f, i) => assert.ok(f >= 5 - input.drifts[i] && f <= 5 + input.drifts[i]));
+});
+
+test('层级三反例：等成本点上字典序更小的码字序列（手工固定输入）', () => {
+  const input = {
+    alerts: [
+      robustAlert('a0', 6, 1, 2), robustAlert('a1', 11, 2, 6), robustAlert('a2', 15, 3, 4),
+      robustAlert('a3', 5, 2, 5), robustAlert('a4', 4, 2, 3),
+    ],
+    reserved: [],
+    drifts: [0, 1, 0, 0, 1],
+  };
+  const r = checkRobustness(input);
+  assert.equal(r.status, 'counterexample');
+  const w = r.witness;
+  assert.equal(w.firstChangedLevel, 3);
+  assert.equal(w.totalOffset, 1);
+  assert.deepEqual(w.freqs, [6, 11, 15, 5, 5]);
+  // 层级三：成本与最大码长不变，仅码字序列字典序改变
+  assert.equal(w.replacement.cost, w.baseline.costAtWitness);
+  assert.equal(w.replacement.maxLength, w.baseline.maxLength);
+  assert.notDeepEqual(w.replacement.codes, w.baseline.codes);
+});
+
+test('全盒暴力对拍：小规模随机用例的稳健结论与逐点重解完全一致', () => {
+  function rnd(seed) {
+    let t = seed;
+    return () => {
+      t += 0x6d2b79f5;
+      let x = Math.imul(t ^ (t >>> 15), t | 1);
+      x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  // 允许 0 频点的内部重解（复核盒下界可为 0）
+  const solvePoint = (alerts, reserved) => {
+    // 直接走公开 solve：测试频点经夹紧后均 ≥1，故可用
+    return solve({ alerts, reserved });
+  };
+  const rand = rnd(20260926);
+  for (let tc = 0; tc < 18; tc++) {
+    const n = 5;
+    const alerts = Array.from({ length: n }, (_, i) => {
+      const lo = 1 + Math.floor(rand() * 2);
+      return robustAlert(`s${i}`, 2 + Math.floor(rand() * 8), lo, Math.min(4, lo + 1 + Math.floor(rand() * 2)));
+    });
+    const pool = ['0', '1', '00', '11'];
+    const reserved = pool.filter(() => rand() < 0.15).slice(0, 2);
+    if (solve({ alerts, reserved }).status !== 'optimal') continue;
+    const drifts = alerts.map(() => Math.floor(rand() * 2)); // 0..1，盒 ≤ 32
+    const r = checkRobustness({ alerts, reserved, drifts });
+    assert.ok(['robust', 'counterexample'].includes(r.status));
+
+    // 枚举盒内每一个频点
+    const base = solve({ alerts, reserved });
+    const c0 = base.alerts.map((x) => x.code).join('|');
+    const l0 = base.alerts.map((x) => x.length);
+    const f0 = alerts.map((a) => a.freq);
+    const first = [];
+    const cur = f0.slice();
+    (function rec(i) {
+      if (i === n) {
+        const rr = solvePoint(alerts.map((a, k) => ({ ...a, freq: cur[k] })), reserved);
+        if (rr.status === 'optimal' && rr.alerts.map((x) => x.code).join('|') !== c0) {
+          const cost0 = cur.reduce((s, f, k) => s + f * l0[k], 0);
+          const lv = rr.cost < cost0 ? 1 : rr.maxLength !== base.maxLength ? 2 : 3;
+          first.push({ f: cur.slice(), off: cur.reduce((s, f, k) => s + Math.abs(f - f0[k]), 0), lv });
+        }
+        return;
+      }
+      for (let f = f0[i] - drifts[i]; f <= f0[i] + drifts[i]; f++) {
+        cur[i] = f;
+        rec(i + 1);
+      }
+    })(0);
+    first.sort((p, q) => p.off - q.off || (p.f < q.f ? -1 : p.f > q.f ? 1 : 0));
+
+    if (first.length === 0) {
+      assert.equal(r.status, 'robust', `用例 ${tc} 应为稳健`);
+    } else {
+      assert.equal(r.status, 'counterexample', `用例 ${tc} 应有反例`);
+      const e = first[0];
+      assert.equal(r.witness.totalOffset, e.off, `用例 ${tc} 总偏移`);
+      assert.deepEqual(r.witness.freqs, e.f, `用例 ${tc} 频次序列`);
+      assert.equal(r.witness.firstChangedLevel, e.lv, `用例 ${tc} 决胜层级`);
+    }
+  }
+});
+
+test('大漂移大频次：复核可完成且见证/证书结构自洽', () => {
+  const input = {
+    alerts: [
+      robustAlert('a', 500, 1, 12), robustAlert('b', 300, 1, 12), robustAlert('c', 200, 1, 12),
+      robustAlert('d', 100, 1, 12), robustAlert('e', 50, 1, 12),
+    ],
+    reserved: ['1010'],
+    drifts: [40, 30, 20, 15, 10],
+  };
+  const r = checkRobustness(input);
+  assert.ok(['robust', 'counterexample'].includes(r.status));
+  assert.ok(BigInt(r.combos) > 0n);
+  if (r.status === 'counterexample') {
+    const w = r.witness;
+    assert.ok(w.totalOffset >= 1);
+    assert.equal(w.offsets.reduce((s, x) => s + x, 0), w.totalOffset);
+    w.freqs.forEach((f, i) => {
+      const a = input.alerts[i];
+      assert.ok(f >= a.freq - input.drifts[i] && f <= a.freq + input.drifts[i]);
+    });
+    assert.ok([1, 2, 3].includes(w.firstChangedLevel));
+    assert.ok(w.levelName.length > 0);
+    assert.equal(w.replacement.alerts.length, 5);
+  } else {
+    assert.ok(r.tuplesEnumerated > 0);
+  }
 });

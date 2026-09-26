@@ -46,6 +46,21 @@
     <section id="result-panel" class="panel" aria-label="编配结果">
       <h2>② 编配结果</h2>
       <div id="results"></div>
+
+      <div id="robustness-panel" class="robustness" hidden>
+        <h2>③ 稳健性复核</h2>
+        <p class="hint">
+          为每类警报填写不超过其预计发送频次的非负整数频次漂移幅度。
+          复核将在每类频次独立落入「预计−幅度 ～ 预计+幅度」闭区间的
+          <b>全部整数组合</b>下，依据原有码长区间、保留前缀与三级决胜规则
+          重新判定当前码表是否始终仍为最终解（逐一枚举，不抽样端点、不复用旧结论）。
+        </p>
+        <div id="drift-rows"></div>
+        <div class="row-actions">
+          <button type="button" id="robust-check" class="btn primary">发起稳健性复核</button>
+        </div>
+        <div id="robust-result"></div>
+      </div>
     </section>
   </main>
 
